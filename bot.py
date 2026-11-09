@@ -120,7 +120,7 @@ CHAT_ID = int(_req("CHAT_ID"))
 SUPER_ADMINS = {int(x) for x in _req("SUPER_ADMINS").replace(" ", "").split(",") if x}
 DATABASE_URL = _req("DATABASE_URL")
 PORT = int(os.getenv("PORT", "8080"))
-BUTTON_STYLE = os.getenv("BUTTON_STYLE", "emoji").lower()
+BUTTON_STYLE = os.getenv("BUTTON_STYLE", "auto").lower()
 
 
 # ======== utils/helpers.py ========
