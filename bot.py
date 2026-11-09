@@ -939,12 +939,17 @@ def in_chat(member) -> bool:
 
 @router_chat_events.message(F.content_type.in_(SERVICE))
 async def service_messages(m: Message, bot: Bot):
+    log.info("service message: %s", m.content_type)
+    for u in (m.new_chat_members or []):
+        if not u.is_bot:
+            await handle_join(bot, u)
     await safe_delete(bot, m.chat.id, m.message_id)
 
 
 @router_chat_events.chat_member()
 async def on_chat_member(event: ChatMemberUpdated, bot: Bot):
     user = event.new_chat_member.user
+    log.info("chat_member: %s %s -> %s", user.id, event.old_chat_member.status, event.new_chat_member.status)
     if user.is_bot:
         return
     was, now_in = in_chat(event.old_chat_member), in_chat(event.new_chat_member)
@@ -954,9 +959,23 @@ async def on_chat_member(event: ChatMemberUpdated, bot: Bot):
         await handle_leave(bot, user)
 
 
+_joining: set = set()
+
+
 async def handle_join(bot: Bot, user) -> None:
-    if roles_is_admin(user.id):
+    if roles_is_admin(user.id) or user.id in _joining:
         return
+    _joining.add(user.id)
+    try:
+        if await db_fetchval("select 1 from pending_captcha where user_id=$1", user.id):
+            return  # проверка уже идёт (событие пришло дважды)
+        await _do_join(bot, user)
+    finally:
+        _joining.discard(user.id)
+
+
+async def _do_join(bot: Bot, user) -> None:
+    log.info("join: %s", user.id)
     await users_touch(user, status="pending", joined=True)
     raid = await protection_register_join(bot)
     if raid and settings_get("raid_block"):
@@ -2055,6 +2074,25 @@ async def main() -> None:
     task = asyncio.create_task(scheduler_run(bot))
     me = await bot.me()
     log.info("Бот @%s запущен, чат %s", me.username, CHAT_ID)
+    problem = None
+    try:
+        cm = await bot.get_chat_member(CHAT_ID, bot.id)
+        if cm.status != "administrator":
+            problem = "бот не админ в чате"
+        else:
+            miss = [n for n, k in (("удалять сообщения", "can_delete_messages"),
+                                   ("ограничивать участников", "can_restrict_members"))
+                    if not getattr(cm, k, False)]
+            if miss:
+                problem = "у бота нет прав: " + ", ".join(miss)
+    except TelegramAPIError as e:
+        problem = f"бот не видит чат {CHAT_ID} ({e}). Проверь CHAT_ID и что бот добавлен в чат"
+    if problem:
+        log.error("ПРОБЛЕМА С ЧАТОМ: %s", problem)
+        for sid in SUPER_ADMINS:
+            await safe_send(bot, sid, f"⚠️ Капча работать не будет: {problem}.")
+    else:
+        log.info("Права бота в чате в порядке")
     try:
         await dp.start_polling(
             bot, allowed_updates=["message", "callback_query", "chat_member", "my_chat_member"]
