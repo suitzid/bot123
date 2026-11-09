@@ -120,7 +120,7 @@ CHAT_ID = int(_req("CHAT_ID"))
 SUPER_ADMINS = {int(x) for x in _req("SUPER_ADMINS").replace(" ", "").split(",") if x}
 DATABASE_URL = _req("DATABASE_URL")
 PORT = int(os.getenv("PORT", "8080"))
-BUTTON_STYLE = os.getenv("BUTTON_STYLE", "auto").lower()
+BUTTON_STYLE = os.getenv("BUTTON_STYLE", "emoji").lower()
 
 
 # ======== utils/helpers.py ========
@@ -362,8 +362,8 @@ async def users_touch(user, status: str | None = None, joined: bool = False) -> 
         on conflict (user_id) do update set
             username = excluded.username,
             full_name = excluded.full_name,
-            status = coalesce($5::text, users_status),
-            joined_at = case when $4::boolean then now() else users_joined_at end
+            status = coalesce($5::text, users.status),
+            joined_at = case when $4::boolean then now() else users.joined_at end
         """,
         user.id, user.username, user.full_name, joined, status,
     )
@@ -940,10 +940,12 @@ def in_chat(member) -> bool:
 @router_chat_events.message(F.content_type.in_(SERVICE))
 async def service_messages(m: Message, bot: Bot):
     log.info("service message: %s", m.content_type)
-    for u in (m.new_chat_members or []):
-        if not u.is_bot:
-            await handle_join(bot, u)
-    await safe_delete(bot, m.chat.id, m.message_id)
+    try:
+        for u in (m.new_chat_members or []):
+            if not u.is_bot:
+                await handle_join(bot, u)
+    finally:
+        await safe_delete(bot, m.chat.id, m.message_id)
 
 
 @router_chat_events.chat_member()
@@ -991,6 +993,13 @@ async def _do_join(bot: Bot, user) -> None:
         await bot.restrict_chat_member(CHAT_ID, user.id, permissions=moderation_NO_PERMS)
     except TelegramAPIError as e:
         log.error("restrict on join failed (нет прав?): %s", e)
+        note = await safe_send(
+            bot, CHAT_ID,
+            f"⚠️ Бот не смог ограничить нового участника: {esc(str(e))}\n"
+            "Проверь права бота: он должен быть админом с правом «Блокировка пользователей».",
+        )
+        if note:
+            await scheduler_schedule_delete(CHAT_ID, note.message_id, 30)
         return
     old = await db_fetchval("select chat_message_id from pending_captcha where user_id=$1", user.id)
     await safe_delete(bot, CHAT_ID, old)
@@ -2059,9 +2068,16 @@ async def main() -> None:
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(storage=MemoryStorage())
 
+    last_err = [0.0]
+
     @dp.error()
     async def on_error(event: ErrorEvent):
         log.exception("Ошибка при обработке апдейта", exc_info=event.exception)
+        if time.time() - last_err[0] > 30:
+            last_err[0] = time.time()
+            txt = f"⚠️ Ошибка бота: {type(event.exception).__name__}: {str(event.exception)[:300]}"
+            for sid in SUPER_ADMINS:
+                await safe_send(bot, sid, esc(txt))
         return True
 
     dp.include_routers(
