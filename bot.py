@@ -23,7 +23,7 @@ from aiogram.types import Message
 from aiogram import Bot, F, Router
 from aiogram.types import ChatMemberUpdated, Message
 from aiogram.types import CallbackQuery, ChatMemberUpdated, ContentType, Message
-from aiogram.filters import Command, CommandObject
+from aiogram.filters import Command, CommandObject, Filter
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
 from urllib.parse import urlparse
@@ -136,8 +136,9 @@ def mention(uid: int, name: str | None = None) -> str:
     return f'<a href="tg://user?id={uid}">{esc(name or str(uid))}</a>'
 
 
-_DUR = re.compile(r"^(\d+)\s*([smhdw]?)$", re.I)
-_MULT = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+_DUR = re.compile(r"^(\d+)\s*([smhdwсмчдн]?)$", re.I)
+_MULT = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800,
+         "с": 1, "м": 60, "ч": 3600, "д": 86400, "н": 604800}
 
 
 def parse_duration(s: str, bare: str = "s") -> int | None:
@@ -807,6 +808,57 @@ async def listing_render_list(kind: str, page: int = 0, back: bool = False):
     return "\n".join(lines), kb(*rows_kb)
 
 
+# ======== команды: / . ! и русские алиасы ========
+ALIASES = {
+    "warn": ["warn", "варн", "пред"],
+    "unwarn": ["unwarn", "унварн", "снятьварн"],
+    "warns": ["warns", "варны"],
+    "mute": ["mute", "мут"],
+    "unmute": ["unmute", "размут", "унмут"],
+    "ban": ["ban", "бан"],
+    "unban": ["unban", "разбан", "унбан"],
+    "kick": ["kick", "кик"],
+    "banlist": ["banlist", "баны", "банлист"],
+    "mutelist": ["mutelist", "муты", "мутлист"],
+    "rules": ["rules", "правила"],
+    "info": ["info", "инфо"],
+    "help": ["help", "хелп", "помощь"],
+    "addadmin": ["addadmin", "админ"],
+    "deladmin": ["deladmin", "унадмин", "снятьадмина"],
+    "admin": ["admin", "панель"],
+}
+ALIAS_TO_CMD = {a: c for c, al in ALIASES.items() for a in al}
+CMD_RE = re.compile(r"^([/.!])(\w+)(?:@(\w+))?(?:\s+(.*))?$", re.S)
+
+
+def parse_cmd(text, bot_username=None):
+    """'.бан 1ч спам' -> ('ban', '1ч спам', '.'); не команда -> None."""
+    m = CMD_RE.match((text or "").strip())
+    if not m:
+        return None
+    prefix, word, mention_, args = m.groups()
+    if mention_ and bot_username and mention_.lower() != bot_username.lower():
+        return None
+    name = ALIAS_TO_CMD.get(word.lower())
+    if not name:
+        return None
+    return name, (args or "").strip(), prefix
+
+
+class Cmd(Filter):
+    def __init__(self, name: str):
+        self.name = name
+
+    async def __call__(self, message: Message, bot: Bot):
+        if not message.text:
+            return False
+        me = await bot.me()
+        r = parse_cmd(message.text, me.username)
+        if not r or r[0] != self.name:
+            return False
+        return {"command": CommandObject(prefix=r[2], command=r[0], args=r[1] or None)}
+
+
 # ======== handlers/common.py ========
 async def tmp(bot: Bot, text: str, secs: int | None = None, **kw):
     """Сообщение в чат, которое удалится само."""
@@ -1010,7 +1062,7 @@ def _dur_reason(rest: list[str], default: int):
     return default, " ".join(rest)
 
 
-@router_moderation_cmds.message(Command("warn"))
+@router_moderation_cmds.message(Cmd("warn"))
 async def c_warn(m: Message, command: CommandObject, bot: Bot):
     t = await _target(m, command, bot)
     if not t:
@@ -1029,7 +1081,7 @@ async def c_warn(m: Message, command: CommandObject, bot: Bot):
     await _done(m, bot, text, "warn", uid, f"{cnt}/{limit} {reason}".strip())
 
 
-@router_moderation_cmds.message(Command("unwarn"))
+@router_moderation_cmds.message(Cmd("unwarn"))
 async def c_unwarn(m: Message, command: CommandObject, bot: Bot):
     t = await _target(m, command, bot)
     if not t:
@@ -1044,7 +1096,7 @@ async def c_unwarn(m: Message, command: CommandObject, bot: Bot):
     await _done(m, bot, f"♻️ С {name} снято предупреждение ({cnt}/{settings_get('warn_limit')})", "unwarn", uid)
 
 
-@router_moderation_cmds.message(Command("warns"))
+@router_moderation_cmds.message(Cmd("warns"))
 async def c_warns(m: Message, command: CommandObject, bot: Bot):
     t = await _target(m, command, bot)
     if not t:
@@ -1059,7 +1111,7 @@ async def c_warns(m: Message, command: CommandObject, bot: Bot):
     await tmp(bot, "\n".join(lines))
 
 
-@router_moderation_cmds.message(Command("mute"))
+@router_moderation_cmds.message(Cmd("mute"))
 async def c_mute(m: Message, command: CommandObject, bot: Bot):
     t = await _target(m, command, bot)
     if not t:
@@ -1076,7 +1128,7 @@ async def c_mute(m: Message, command: CommandObject, bot: Bot):
     await _done(m, bot, text, "mute", uid, f"{fmt_duration(secs)} {reason}".strip())
 
 
-@router_moderation_cmds.message(Command("unmute"))
+@router_moderation_cmds.message(Cmd("unmute"))
 async def c_unmute(m: Message, command: CommandObject, bot: Bot):
     t = await _target(m, command, bot)
     if not t:
@@ -1089,7 +1141,7 @@ async def c_unmute(m: Message, command: CommandObject, bot: Bot):
     await _done(m, bot, f"🔊 {mention(uid, await users_name(uid))} размучен", "unmute", uid)
 
 
-@router_moderation_cmds.message(Command("ban"))
+@router_moderation_cmds.message(Cmd("ban"))
 async def c_ban(m: Message, command: CommandObject, bot: Bot):
     t = await _target(m, command, bot)
     if not t:
@@ -1106,7 +1158,7 @@ async def c_ban(m: Message, command: CommandObject, bot: Bot):
     await _done(m, bot, text, "ban", uid, f"{fmt_duration(secs)} {reason}".strip())
 
 
-@router_moderation_cmds.message(Command("unban"))
+@router_moderation_cmds.message(Cmd("unban"))
 async def c_unban(m: Message, command: CommandObject, bot: Bot):
     t = await _target(m, command, bot)
     if not t:
@@ -1119,7 +1171,7 @@ async def c_unban(m: Message, command: CommandObject, bot: Bot):
     await _done(m, bot, f"✅ {mention(uid, await users_name(uid))} разбанен", "unban", uid)
 
 
-@router_moderation_cmds.message(Command("kick"))
+@router_moderation_cmds.message(Cmd("kick"))
 async def c_kick(m: Message, command: CommandObject, bot: Bot):
     t = await _target(m, command, bot)
     if not t:
@@ -1133,7 +1185,7 @@ async def c_kick(m: Message, command: CommandObject, bot: Bot):
     await _done(m, bot, f"👢 {mention(uid, await users_name(uid))} исключён из чата", "kick", uid, reason)
 
 
-@router_moderation_cmds.message(Command("addadmin"))
+@router_moderation_cmds.message(Cmd("addadmin"))
 async def c_addadmin(m: Message, command: CommandObject, bot: Bot):
     if not (m.from_user and roles_is_super(m.from_user.id)):
         return await safe_delete(bot, m.chat.id, m.message_id)
@@ -1149,7 +1201,7 @@ async def c_addadmin(m: Message, command: CommandObject, bot: Bot):
     await logs_log_event(bot, m.from_user.id, "admin_add", uid)
 
 
-@router_moderation_cmds.message(Command("deladmin"))
+@router_moderation_cmds.message(Cmd("deladmin"))
 async def c_deladmin(m: Message, command: CommandObject, bot: Bot):
     if not (m.from_user and roles_is_super(m.from_user.id)):
         return await safe_delete(bot, m.chat.id, m.message_id)
@@ -1170,14 +1222,23 @@ router_info = Router()
 router_info.message.filter(F.chat.id == CHAT_ID)
 
 
-@router_info.message(Command("rules"))
+@router_info.message(Cmd("rules"))
 async def c_rules(m: Message, bot: Bot):
     await safe_delete(bot, m.chat.id, m.message_id)
     text = settings_get("rules_text") or "Правила не заданы."
     await tmp(bot, text, secs=60)
 
 
-@router_info.message(Command("info"))
+@router_info.message(Cmd("help"))
+async def c_help(m: Message, bot: Bot):
+    await safe_delete(bot, m.chat.id, m.message_id)
+    if m.from_user and roles_is_admin(m.from_user.id):
+        await tmp(bot, HELP, secs=90)
+    else:
+        await tmp(bot, HELP_USER, secs=45)
+
+
+@router_info.message(Cmd("info"))
 async def c_info(m: Message, command: CommandObject, bot: Bot):
     if not m.from_user:
         return
@@ -1229,12 +1290,12 @@ async def _list_cmd(m: Message, bot: Bot, kind: str):
         await scheduler_schedule_delete(CHAT_ID, msg.message_id, 120)
 
 
-@router_info.message(Command("banlist"))
+@router_info.message(Cmd("banlist"))
 async def c_banlist(m: Message, bot: Bot):
     await _list_cmd(m, bot, "ban")
 
 
-@router_info.message(Command("mutelist"))
+@router_info.message(Cmd("mutelist"))
 async def c_mutelist(m: Message, bot: Bot):
     await _list_cmd(m, bot, "mute")
 
@@ -1434,15 +1495,20 @@ router_private.message.filter(F.chat.type == "private")
 router_private.callback_query.filter(F.message.chat.type == "private")
 
 HELP = (
-    "<b>Команды в чате</b>\n"
-    "/warn, /unwarn, /warns — предупреждения\n"
-    "/mute &lt;время&gt;, /unmute — мут (30m, 2h, 1d)\n"
-    "/ban [время], /unban, /kick\n"
-    "/banlist, /mutelist — списки\n"
-    "/info — статус пользователя, /rules — правила\n"
-    "Цель: ответом на сообщение, @username или ID.\n\n"
-    "<b>Главные админы</b>: /admin — панель настроек, /addadmin, /deladmin."
+    "<b>Команды</b> (с точкой или /, по-русски или по-английски)\n"
+    ".варн [причина] — предупреждение (.warn)\n"
+    ".снятьварн — снять варн (.unwarn)\n"
+    ".варны — варны человека (.warns)\n"
+    ".мут [время] [причина] — мут (.mute), время: 30м, 2ч, 1д\n"
+    ".размут (.unmute)\n"
+    ".бан [время] [причина] (.ban), .разбан (.unban)\n"
+    ".кик (.kick)\n"
+    ".баны (.banlist), .муты (.mutelist)\n"
+    ".инфо (.info), .правила (.rules)\n\n"
+    "Кого: ответом на сообщение, @username или ID.\n"
+    "Главные админы: .админ и .унадмин (добавить/снять админа), панель — /admin в ЛС бота."
 )
+HELP_USER = "Команды: .правила — правила чата, .инфо — твой статус."
 
 
 def menu_kb(uid: int):
@@ -1465,7 +1531,7 @@ async def start(m: Message, bot: Bot, state: FSMContext):
     await show_next(bot, u.id, m.chat.id)
 
 
-@router_private.message(Command("help"))
+@router_private.message(Cmd("help"))
 async def help_cmd(m: Message):
     if m.from_user and roles_is_admin(m.from_user.id):
         await m.answer(HELP)
@@ -1477,12 +1543,12 @@ async def _list(m: Message, kind: str):
         await m.answer(text, reply_markup=markup)
 
 
-@router_private.message(Command("banlist"))
+@router_private.message(Cmd("banlist"))
 async def banlist(m: Message):
     await _list(m, "ban")
 
 
-@router_private.message(Command("mutelist"))
+@router_private.message(Cmd("mutelist"))
 async def mutelist(m: Message):
     await _list(m, "mute")
 
@@ -1708,7 +1774,7 @@ async def edit(cb: CallbackQuery, text: str, markup) -> None:
     await cb.answer()
 
 
-@router_admin_panel.message(Command("admin"))
+@router_admin_panel.message(Cmd("admin"))
 async def admin_cmd(m: Message, state: FSMContext):
     await state.clear()
     text, markup = main_view()
